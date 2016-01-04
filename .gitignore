@@ -1,0 +1,6 @@
+/DATA
+/log/*
+*~
+\#*
+.Rproj.user
+.Rhistory

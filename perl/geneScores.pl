@@ -1,0 +1,123 @@
+#!/usr/bin/perl
+
+## Macd location (get from my github)
+use lib '/home/oliver/GIT_REPOS/macd/lib';
+use Macd;
+use FindBin qw($Bin);
+use File::Path qw(make_path);
+use File::Find;
+use strict;
+use Data::Dumper;
+
+## get these from environment variables
+
+my $MODE=shift;
+
+
+my $HOME = $ENV{HOME} || die "NO \$HOME variable set\n";
+my $GRPATH = $ENV{GRPATH} || die "NO \$GRPATH variable set\n";
+my $R_LIBS = $ENV{R_LIBS} || die "NO \$R_LIBS variable\n";
+my $CHIGP_PATH = "$ENV{GRPATH}/CHIGP/";
+
+
+## site specific conf file for macd - see http://github.com/ollyburren/macd
+## for more details
+my $grid_cnf = "$GRPATH/macd/example/ini/example.cnf";
+
+my $r_lib_dir = $R_LIBS;
+	
+my $DRIVER = Macd::GRIDDriverFactory->instantiate('SGE',inifile => $grid_cnf);
+
+
+
+###############
+#CONFIGURATION#
+###############
+## where to mail to once finished.
+my $PREFIX = 'astle_';
+my $BASEDIR = "$GRPATH/astle/DATA/";
+my $DOTEST = 0; #IF set to true allows us to test the script by running only a few jobs
+my $CHIC_THRESH=5;
+my $PMI_DIR = "$BASEDIR/out/pmi/";
+my $INT_FILE="$BASEDIR/chic/merged_samples_12Apr2015_full_denorm_bait2baits_e75.tab";
+my $CSNP_FILE="$BASEDIR/support/cSNPs_w_ENSG.e75.bed";
+my $FRAG_FILE="$BASEDIR/support/Digest_Human_HindIII.bed";
+my $REG_FILE="$BASEDIR/support/0.1cM_regions.b37.bed";
+my $RDATA_DIR="$BASEDIR/RDATA/";
+my $CSNPS="$RDATA_DIR/${PREFIX}csnps.by.ld.RData";
+my $INTS="$RDATA_DIR/${PREFIX}interactions.RData";
+my $FRAGS="$RDATA_DIR/${PREFIX}frags.by.ld.RData";
+my $TARGET_GENE_CSNPS_ONLY=1;
+my $SUPPORT_RSCRIPT="/home/oliver/bin/Rscript $CHIGP_PATH/R/generateResourceFiles.R";
+my $RSCRIPT="/home/oliver/bin/Rscript $CHIGP_PATH/R/computeGeneScore.R";
+my $OUTDIR = "$BASEDIR/out/geneScore/";
+my $LOG_DIR = "$BASEDIR/log/geneScore/";
+
+my $step = Macd::Step->new(
+	logdir=> $LOG_DIR,
+	driver=>$DRIVER,
+	env_settings=>"R_LIBS=$r_lib_dir,GRPATH=$GRPATH"
+);
+
+## if our support files don't exist create them first.
+
+#"$RSCRIPT_BIN $GRPATH/CHIGP/R/generateResourceFiles.R --prefix="mifsud_" --cSNP_file="../DATA/support/cSNPs_w_ENSG.e75.bed" --interaction_file="../DATA/chic/mifsud_et_al.pm.for.chicp.25_09_2015b.tab" --pchic.thresh=5 --res_frag_file= --region_bed_file='../DATA/support/0.1cM_regions.b37.bed' --out_dir='../DATA/RDATA/'"
+
+if(! -e $CSNPS){
+	my $cmd = "$SUPPORT_RSCRIPT --prefix=$PREFIX --cSNP_file=$CSNP_FILE --interaction_file=$INT_FILE --pchic.thresh=$CHIC_THRESH --res_frag_file=$FRAG_FILE --region_bed_file=$REG_FILE out_dir=$RDATA_DIR";
+	#die $cmd;
+	`$cmd`
+}
+
+
+if(! -e $OUTDIR){
+	print "Making path $OUTDIR\n";
+	make_path($OUTDIR);
+}
+
+my $CONTROL;
+my @GWAS;
+
+## get all PMI 
+find(sub{
+	if(/\.pmi$/){                                 
+		(my $stub = $_)=~s/\.pmi//;
+		push @GWAS,$stub;
+	}
+},($PMI_DIR));
+
+#$RSCRIPT_BIN $GRPATH/CHIGP/R/computeGeneScore.R --pmi_file=$i --out_file=${SCOREPATH}$ofile --csnps=../DATA/RDATA/${PREFIX}csnps.by.ld.RData --int=../DATA/RDATA/${PREFIX}interactions.RData --frags=../DATA/RDATA/${PREFIX}frags.by.ld.RData --target.gene.cSNPs.only=1
+
+
+my $addcount;
+foreach my $g(@GWAS){
+	my $ofile = "$OUTDIR/${g}.pmi.tab";
+	next if -e $ofile;
+	my @param = "$RSCRIPT";
+	push @param, "--pmi_file=$PMI_DIR$g.pmi";
+	push @param, "--out_file=$ofile";
+	push @param, "--int=$INTS";
+	push @param, "--frags=$FRAGS";
+	push @param, "--csnps=$CSNPS";
+	push @param, "--target.gene.cSNPs.only=1";
+	my $cmd = join(" ",@param);
+	#die "$cmd";
+	my $job =  Macd::Step::Job->new(command=>$cmd);
+	$step->add_job($job);
+	$addcount++;
+	last if $DOTEST;
+}
+
+
+
+
+
+if($step->execute()){
+	print "Step submitted successfully\n";
+	## we can hold up prog execution as follows
+	## in case we have a step below that requires the output
+	$step->wait_on_complete();
+	print "Step completed successfully\n";
+}else{
+	print "Error submitting step\n";
+}
